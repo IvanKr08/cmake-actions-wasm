@@ -23,6 +23,11 @@ on:
         required: false
         default: true
         type: boolean
+      enable-wasm:
+        description: "Enable WASM builds."
+        required: false
+        default: true
+        type: boolean
       lib-name:
         description: "Library name (e.g., Project)"
         required: true
@@ -66,6 +71,10 @@ on:
         description: "Windows binary name"
         required: true
         type: string
+      bin-name-wasm:
+        description: "WASM binary name"
+        required: true
+        type: string
       bin-name-osx-normalized:
         description: "Normalized macOS binary name"
         required: true
@@ -80,6 +89,10 @@ on:
         type: string
       bin-name-windows-normalized:
         description: "Normalized Windows binary name"
+        required: true
+        type: string
+      bin-name-wasm-normalized:
+        description: "Normalized WASM binary name"
         required: true
         type: string
       build-output-dir:
@@ -112,6 +125,11 @@ on:
         required: false
         default: ""
         type: string
+      cmake-flags-wasm:
+        description: "Additional CMake flags for WASM."
+        required: false
+        default: ""
+        type: string
       pre-configure-steps:
         description: "Commands to run before CMake configure (optional)"
         required: false
@@ -128,6 +146,11 @@ on:
         default: "21"
         type: string
       android-deps:
+        description: "Space-separated list of Ubuntu packages to install before build."
+        required: false
+        default: "build-essential cmake ninja-build wget"
+        type: string
+      wasm-deps:
         description: "Space-separated list of Ubuntu packages to install before build."
         required: false
         default: "build-essential cmake ninja-build wget"
@@ -182,6 +205,11 @@ on:
         required: false
         default: true
         type: boolean
+      use-vcpkg-wasm:
+        description: "Set to true to enable vcpkg integration on WASM."
+        required: false
+        default: true
+        type: boolean
       vcpkg-packages:
         description: "Space-separated list of vcpkg packages to install."
         required: false
@@ -207,6 +235,11 @@ on:
         required: false
         default: ""
         type: string
+      vcpkg-packages-wasm:
+        description: "Space-separated list of vcpkg packages to install on WASM."
+        required: false
+        default: ""
+        type: string
       vcpkg-triplet-linux:
         description: "Template for vcpkg triplet for Linux, e.g. 'triplet-{arch}'. If set, replaces {arch} with matrix.cmake-arch."
         required: false
@@ -226,6 +259,11 @@ on:
         description: "Template for vcpkg triplet for Android, e.g. 'triplet-{arch}'. If set, replaces {arch} with matrix.cmake-arch."
         required: false
         default: "{arch}-android"
+        type: string
+      vcpkg-triplet-wasm:
+        description: "Template for vcpkg triplet for WASM, e.g. 'triplet-{arch}'. If set, replaces {arch} with matrix.cmake-arch."
+        required: false
+        default: "{arch}-emscripten"
         type: string
       setup-vulkan:
         description: "Whether to setup Vulkan SDK (optional)"
@@ -608,6 +646,113 @@ jobs:
           cp -L ${{ inputs.repo-path }}/build/${{ inputs.bin-name-android }} ${{ inputs.build-output-dir }}/${{ matrix.cmake-arch }}/${{ inputs.bin-name-android-normalized }}
           ls ${{ inputs.build-output-dir }}/${{ matrix.cmake-arch }}
       - name: Upload Artifacts (android-${{ matrix.arch }})
+        if: matrix.enable == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.lib-name }}-${{ matrix.rtid }}
+          path: ${{ inputs.build-output-dir }}/${{ matrix.cmake-arch }}/*.*
+          if-no-files-found: error
+  build-wasm:
+    env:
+      wasm-cmake-flags: -G "Ninja"
+    runs-on: ubuntu-latest
+    if: inputs.enable-wasm == true
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            os-name: browser
+            arch: wasm
+            cmake-arch: wasm
+            rtid: browser-wasm
+            vcpkg-arch: wasm32
+            vcpkg-triplet: ${{ inputs.vcpkg-triplet-wasm }}
+            enable: ${{ inputs.enable-wasm }}
+    steps:
+      - name: Setup environment variables
+        shell: bash
+        run: |
+          arch="${{ matrix.vcpkg-arch }}"
+          tpl="${{ matrix.vcpkg-triplet }}"
+          triplet=$(echo "$tpl" | sed "s/{arch}/$arch/g")
+          echo "VCPKG_TRIPLET=$triplet" >> $GITHUB_ENV
+          echo "DEBUG: arch=$arch tpl=$tpl triplet=$triplet"
+      - uses: actions/checkout@v4
+        if: matrix.enable == true && inputs.checkout-self
+      - uses: actions/checkout@v4
+        if: matrix.enable == true
+        with:
+          repository: "${{ inputs.repo }}"
+          ref: "${{ inputs.repo-tag }}"
+          path: "${{ inputs.repo-path }}"
+          submodules: true
+      - name: Install dependencies on Ubuntu
+        if: matrix.enable == true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ inputs.wasm-deps }}
+      - name: Setup Emscripten
+        run: |
+          cd ${{ inputs.repo-path }}
+          git clone https://github.com/emscripten-core/emsdk.git
+          cd emsdk
+          ./emsdk install 3.1.56
+          ./emsdk activate 3.1.56 --permanent
+          echo "PATH=$PATH:/home/runner/work/temp-wasm-workflow-test/temp-wasm-workflow-test/src/emsdk:/home/runner/work/temp-wasm-workflow-test/temp-wasm-workflow-test/src/emsdk/upstream/emscripten" >> $GITHUB_ENV
+          echo "EMSDK=/home/runner/work/temp-wasm-workflow-test/temp-wasm-workflow-test/src/emsdk" >> $GITHUB_ENV
+      - name: Setup vcpkg for WASM
+        if: matrix.enable == true && inputs.use-vcpkg == true && inputs.use-vcpkg-wasm == true
+        run: |
+          cd ${{ inputs.repo-path }}
+          git clone https://github.com/microsoft/vcpkg.git
+          cd vcpkg
+          ./bootstrap-vcpkg.sh -disableMetrics
+          ./vcpkg install ${{ inputs.vcpkg-packages }} ${{ inputs.vcpkg-packages-wasm }} --triplet "$VCPKG_TRIPLET"
+          echo "VCPKG_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
+      - name: Configure
+        if: matrix.enable == true && matrix.os-name == 'browser'
+        run: |
+          cd ${{ inputs.repo-path }}
+          if [ "${{ inputs.use-vcpkg }}" = "true" ] && [ "${{ inputs.use-vcpkg-wasm }}" = "true" ]; then
+            emcmake cmake -S . -B ./build ${{ env.wasm-cmake-flags }} ${{ inputs.cmake-flags }} ${{ inputs.cmake-flags-wasm }} -DCMAKE_TOOLCHAIN_FILE="./vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="${EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake" --debug-find
+          else
+            emcmake cmake -S . -B ./build ${{ env.wasm-cmake-flags }} ${{ inputs.cmake-flags }} ${{ inputs.cmake-flags-wasm }};
+          fi
+      - name: Pre-Build Setup (WASM)
+        if: matrix.enable == true && inputs.pre-build-steps != ''
+        shell: bash
+        run: |
+          export GHA_RUNNER_OS="${{ matrix.os }}"
+          export GHA_OS_NAME="${{ matrix.os-name }}"
+          export GHA_ARCH="${{ matrix.arch }}"
+          export GHA_CMAKE_ARCH="${{ matrix.cmake-arch }}"
+          export GHA_CMAKE_RTID="${{ matrix.rtid }}"
+          export GHA_CMAKE_VCPKG_TRIPLET="$VCPKG_TRIPLET"
+          ${{ inputs.pre-build-steps }}
+      - name: Build
+        if: matrix.enable == true
+        run: |
+          cd ${{ inputs.repo-path }}
+          cmake --build ./build --config Release
+      - name: Post-Build Steps (WASM)
+        if: matrix.enable == true && inputs.post-build-steps != ''
+        shell: bash
+        run: |
+          export GHA_RUNNER_OS="${{ matrix.os }}"
+          export GHA_OS_NAME="${{ matrix.os-name }}"
+          export GHA_ARCH="${{ matrix.arch }}"
+          export GHA_CMAKE_ARCH="${{ matrix.cmake-arch }}"
+          export GHA_CMAKE_RTID="${{ matrix.rtid }}"
+          export GHA_CMAKE_VCPKG_TRIPLET="$VCPKG_TRIPLET"
+          ${{ inputs.post-build-steps }}
+      - name: Normalize binaries for WASM
+        if: matrix.enable == true
+        run: |
+          rm -rf ${{ inputs.build-output-dir }}
+          mkdir -p ${{ inputs.build-output-dir }}/${{ matrix.cmake-arch }}
+          cp -L ${{ inputs.repo-path }}/build/${{ inputs.bin-name-wasm }} ${{ inputs.build-output-dir }}/${{ matrix.cmake-arch }}/${{ inputs.bin-name-wasm-normalized }}
+          ls ${{ inputs.build-output-dir }}/${{ matrix.cmake-arch }}
+      - name: Upload Artifacts (WASM)
         if: matrix.enable == true
         uses: actions/upload-artifact@v4
         with:
